@@ -45,11 +45,7 @@ public class Table {
 
 
     public String getColumnListTgt(Config config){
-
-//        String transformColumn = (String)config.config.getOrDefault("column_transform", "");
-
         String colsSql = this.columns.stream()
-//            .map(col -> config.transform(col.name, transformColumn))
             .map(col -> config.getTargetColumnName(col.name))
             .collect(
                     Collectors.joining(", ")

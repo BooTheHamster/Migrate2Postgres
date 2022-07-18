@@ -5,7 +5,7 @@
 
     <groupId>net.twentyonesolutions</groupId>
     <artifactId>Migrate2Postgres</artifactId>
-    <version>1.0.18</version>
+    <version>1.0.19</version>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
@@ -59,7 +59,7 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.2.18</version>
+            <version>42.4.0</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc -->

@@ -8,15 +8,8 @@ import java.net.URL;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Properties;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.function.UnaryOperator;
-
 
 public class Config {
 
@@ -70,7 +63,6 @@ public class Config {
         this.parseDml();
     }
 
-
     private void parseDml(){
 
         String prefix = "dml.";
@@ -80,14 +72,17 @@ public class Config {
             throw new IllegalArgumentException("DML section is not found in config (did you forget to use a template?)");
 
         String[] keys = new String[]{
-             "execute.after_all"
-            ,"execute.before_all"
-            ,"execute.recommended"
-            ,"on_error"
-            ,"select"
-            ,"source_column_quote_prefix"
-            ,"source_column_quote_suffix"
-            ,"threads"
+                "execute.after_all"
+                , "execute.before_all"
+                , "execute.recommended"
+                , "on_error"
+                , "select"
+                , "source_column_quote_prefix"
+                , "source_column_quote_suffix"
+                , "threads"
+                , "explicit_conversion_types"
+                , "skip_tables"
+                , "skip_columns"
         };
 
         // populate result with config value or default of empty string
@@ -308,24 +303,33 @@ public class Config {
     }
 
 
-    public String getTargetTableName(Table table){
+    public TableName getTargetTableName(Table table){
 
         String transformTable = (String)this.config.getOrDefault("table_transform", "");
-
         String name = this.translateTable(table.name);
         String tableName = transform(name, transformTable);
         String schemaName = this.translateSchema(table.schemaName);
+        boolean quoted = (boolean)this.config.getOrDefault("table_quoted", false);
 
-        String result = schemaName.isEmpty() ? tableName : schemaName + "." + tableName;
+        tableName = schemaName.isEmpty()
+                ? tableName
+                : quoted
+                    ? String.format("\"%s\".\"%s\"", schemaName, tableName)
+                    : String.format("%s.%s", schemaName, tableName);
 
-        return result;
+        return new TableName(tableName, schemaName);
     }
 
 
     public String getTargetColumnName(String colName) {
         String transformation = (String)this.config.getOrDefault("column_transform", "");
         String name = this.translateColumn(colName);
-        return this.transform(name, transformation);
+
+        boolean quoted = (boolean)this.config.getOrDefault("column_quoted", false);
+
+        name = transform(name, transformation);
+
+        return quoted ? String.format("\"%s\"", name) : name;
     }
 
 
@@ -454,5 +458,4 @@ public class Config {
 
         return sb.toString().trim();
     }
-
 }

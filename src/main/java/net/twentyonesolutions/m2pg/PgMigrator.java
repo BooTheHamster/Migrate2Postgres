@@ -7,20 +7,16 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
 
@@ -47,7 +43,7 @@ public class PgMigrator {
 
         System.out.println(DISCL + "\n");
 
-        if (args.length == 0){
+        if (args.length == 0) {
             System.out.println(USAGE);
             System.exit(-1);
         }
@@ -79,12 +75,12 @@ public class PgMigrator {
         boolean cmdDdl = cmdAll || action.equalsIgnoreCase("ddl");
         boolean cmdDml = cmdAll || action.equalsIgnoreCase("dml");
 
-        if (cmdDdl){
+        if (cmdDdl) {
             // set cmdDml to false if we're not executing the DDL because the DB is not empty
             cmdDml = doDdl(schema, outputFile + ".sql") && cmdAll;
         }
 
-        if (cmdDml){
+        if (cmdDml) {
             doDml(schema, outputFile + ".log");
         }
 
@@ -102,13 +98,12 @@ public class PgMigrator {
         Path path = Files.write(Paths.get(filename), ddl.getBytes(StandardCharsets.UTF_8));
 
         String sqlCheck = "SELECT count(*) FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
-                        + " AND table_schema NOT IN ('information_schema', 'pg_catalog');";
+                + " AND table_schema NOT IN ('information_schema', 'pg_catalog');";
 
         long count = -1;
         try (Connection conn = schema.config.connect(schema.config.target)) {
             count = Util.selectLong(sqlCheck, conn);
-        }
-        catch (SQLException throwables) {
+        } catch (SQLException throwables) {
             throwables.printStackTrace();
         }
 
@@ -124,8 +119,7 @@ public class PgMigrator {
 
             System.out.println("\n\nExecuted DDL Script:");
             System.out.println(log);
-        }
-        else {
+        } else {
 
             System.out.println("\n\nDatabase is not empty. Not executing DDL Script.");
         }
@@ -147,111 +141,63 @@ public class PgMigrator {
         Path path = Paths.get(filename);
         Util.log(path, getBanner());
 
-        queries = (List<String>)schema.config.dml.getOrDefault("execute.before_all", Collections.EMPTY_LIST);
-        if (!queries.isEmpty()){
-
-            logentry = "-- executing queries execute.before_all";
-            System.out.println("\n" + logentry);
-            Util.log(path, logentry);
-
-            StringBuilder log = new StringBuilder(1024);
-            completed = Util.executeQueries(queries, log, schema.config);
-            Util.log(path, log.toString());
-
-            if (!completed){
-                Util.log(path, "!!!ABORTING!!!");
-                System.exit(1);
-            }
-
-            logentry = "-- completed queries execute.before_all";
-            System.out.println("\n" + logentry);
-            Util.log(path, logentry);
-        }
+        queries = (List<String>) schema.config.dml.getOrDefault("execute.before_all", Collections.EMPTY_LIST);
+        executeQueriesFromFiles(queries, path, schema, "execute.before_all");
 
         int numThreads = 1;
 
         Object arg = schema.config.dml.get("threads");
 
-        if (arg != null){
+        if (arg != null) {
 
-            if (arg instanceof Number){
+            if (arg instanceof Number) {
                 numThreads = ((Number) arg).intValue();
-            }
-            else if (arg instanceof String){
+            } else if (arg instanceof String) {
 
-                if (((String) arg).equalsIgnoreCase("cores")){
+                if (((String) arg).equalsIgnoreCase("cores")) {
                     numThreads = Runtime.getRuntime().availableProcessors();
-                }
-                else {
+                } else {
 
                     try {
                         numThreads = Integer.parseInt((String) arg);
-                    }
-                    catch (NumberFormatException ex){
+                    } catch (NumberFormatException ex) {
                         System.err.println("Failed to parse value of [dml.threads]");
                     }
                 }
-            }
-            else {
+            } else {
                 System.err.println("[dml.threads] has an invalid value: " + arg.toString());
             }
         }
 
         System.out.println("Executing DML with " + numThreads + " concurrent connections");
 
+        List<FutureTask<String>> tasks;
+        List<String> tableNames = schema.schema.keySet().stream().sorted().collect(Collectors.toList());
         ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
 
-        List<Future<String>> tasks = new ArrayList<>();
+        // Copy data.
+        tasks = tableNames
+                .stream()
+                .map(tableName -> {
 
-        for (String tableName : schema.schema.keySet()){
+                    Callable<String> callable = () -> {
+                        try {
+                            return schema.copyTable(tableName, progress);
 
-            Callable<String> callable = () -> {
-                try {
-                    String log = schema.copyTable(tableName, progress);
-                    return log;
-                }
-                catch (Exception ex) {
-                    return ex.getMessage();
-                }
-            };
+                        } catch (Exception ex) {
+                            return ex.getMessage();
+                        }
+                    };
 
-            FutureTask<String> task = new FutureTask(callable);
-            tasks.add(task);
-            executorService.execute(task);
-        }
+                    return new FutureTask<>(callable);
+                })
+                .collect(Collectors.toList());
 
-        tasks
-            .parallelStream()
-            .forEach(task -> {
-                try {
-                    String entry = task.get() + "\n\n";
-                    Util.log(path, entry);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                } catch (ExecutionException e) {
-                    e.printStackTrace();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            });
-
+        executeTasks(tasks, executorService, path);
         executorService.shutdown();
 
-        queries = (List<String>)schema.config.dml.getOrDefault("execute.after_all", Collections.EMPTY_LIST);
-        if (!queries.isEmpty()){
-
-            logentry = "-- executing queries execute.after_all";
-            System.out.println("\n" + logentry);
-            Util.log(path, logentry);
-
-            StringBuilder log = new StringBuilder(1024);
-            completed = Util.executeQueries(queries, log, schema.config);
-            Util.log(path, log.toString());
-            if (!completed){
-                Util.log(path, "!!!ABORTING!!!");
-                System.exit(1);
-            }
-        }
+        queries = (List<String>) schema.config.dml.getOrDefault("execute.after_all", Collections.EMPTY_LIST);
+        executeQueriesFromFiles(queries, path, schema, "execute.after_all");
 
         tc = System.currentTimeMillis() - tc;
 
@@ -279,20 +225,59 @@ public class PgMigrator {
     }
 
 
-    public static String getBanner(){
+    public static String getBanner() {
 
         return "/**\n"
-            + "\tScripted by "
-            + getProductName()
-            + " "
-            + getProductVersion()
-            + " on "
-            + ZonedDateTime.now().format(RFC_1123_DATE_TIME)
-            + "\n\n\t"
-            + DISCL.replace("\n", "\n\t")
-            + "\n**/\n\n";
+                + "\tScripted by "
+                + getProductName()
+                + " "
+                + getProductVersion()
+                + " on "
+                + ZonedDateTime.now().format(RFC_1123_DATE_TIME)
+                + "\n\n\t"
+                + DISCL.replace("\n", "\n\t")
+                + "\n**/\n\n";
     }
 
+    private static void executeTasks(List<FutureTask<String>> tasks, ExecutorService executorService, Path logPath) {
+
+        for (FutureTask<String> task: tasks) {
+            executorService.execute(task);
+        }
+
+        tasks
+                .parallelStream()
+                .forEach(task -> {
+                    try {
+                        String entry = task.get() + "\n";
+                        Util.log(logPath, entry);
+
+                    } catch (InterruptedException | ExecutionException | IOException e) {
+                        e.printStackTrace();
+                    }
+                });
+    }
+
+    private static void executeQueriesFromFiles(List<String> queries, Path logPath, Schema schema, String settingName) throws IOException {
+        if (!queries.isEmpty()) {
+
+            String logentry = String.format("-- executing SQL queries from files in %s", settingName);
+            System.out.println("\n" + logentry);
+            Util.log(logPath, logentry);
+
+            StringBuilder log = new StringBuilder(1024);
+            boolean completed = Util.executeQueries(queries, log, schema.config);
+
+            if (!completed) {
+                Util.log(logPath, "!!!ABORTING!!!");
+                System.exit(1);
+            }
+
+            logentry = "-- completed queries execute.before_all";
+            System.out.println("\n" + logentry);
+            Util.log(logPath, logentry);
+        }
+    }
 
     static class ProgressOneline implements IProgress {
 
@@ -308,18 +293,20 @@ public class PgMigrator {
         @Override
         public void progress(Status status) {
 
-            if (status.row >= status.rowCount){     // if new records were added to the table while copying then row will be greater than rowCount
-//                System.out.println("");
-//                System.out.println("processed " + status.name);
+            if (status.row >= status.rowCount) {     // if new records were added to the table while copying then row will be greater than rowCount
+
+                String statusLine = status.toString();
+
+                System.out.printf("\r%s", statusLine);
+
+                if (lastLine.length() > statusLine.length()) {
+                    System.out.print("                                                           ");
+                }
+
                 processing.remove(status.name);
                 this.remaining.remove(status.name);
                 return;
             }
-
-
-//            Status prev = processing.getOrDefault(status.name, Status.EMPTY);
-//            String prevPct = (prev == Status.EMPTY) ? "0.0" : String.format("%.1f", 100.0 * prev.row / prev.rowCount);
-//            String currPct = String.format("%.1f", 100.0 * status.row / status.rowCount);
 
             processing.put(status.name, status);
 
@@ -327,43 +314,40 @@ public class PgMigrator {
                 return;
             lastReport.set(System.currentTimeMillis());
 
-//            if (!prevPct.equals(currPct)){
-                // print status line
-                StringBuilder sb = new StringBuilder(512);
+            StringBuilder sb = new StringBuilder(512);
 
-                sb.append(remaining.size())
-                  .append(" table")
-                  .append(remaining.size() > 1 ? "s " : " ")
-                  .append("left");
+            sb.append(remaining.size())
+                    .append(" table")
+                    .append(remaining.size() > 1 ? "s " : " ")
+                    .append("left");
 
-                for (Map.Entry<String, Status> e : processing.entrySet()){
+            for (Map.Entry<String, Status> e : processing.entrySet()) {
 
-                    sb.append("   ");
-                    String name = e.getKey();
+                sb.append("   ");
+                String name = e.getKey();
 
-                    name = name.substring(name.indexOf(".") + 1);
+                name = name.substring(name.indexOf(".") + 1);
 
-                    Status s = e.getValue();
-                    sb.append(name).append(": ");
+                Status s = e.getValue();
+                sb.append(name).append(": ");
 
-                    if (s.rowCount > 10_000_000)
-                        sb.append(String.format("%.2f%%", 100.0 * s.row / s.rowCount));
-                    else if (s.rowCount > 10_000)
-                        sb.append(String.format("%.1f%%", 100.0 * s.row / s.rowCount));
-                    else
-                        sb.append(String.format("%d%%", 100 * s.row / s.rowCount));
-                }
+                if (s.rowCount > 10_000_000)
+                    sb.append(String.format("%.2f%%", 100.0 * s.row / s.rowCount));
+                else if (s.rowCount > 10_000)
+                    sb.append(String.format("%.1f%%", 100.0 * s.row / s.rowCount));
+                else
+                    sb.append(String.format("%d%%", 100 * s.row / s.rowCount));
+            }
 
-                String statusLine = sb.toString();
-                if (!statusLine.equals(lastLine)){
+            String statusLine = sb.toString();
+            if (!statusLine.equals(lastLine)) {
 
-                    System.out.printf("\r%s", statusLine);
-                    if (lastLine.length() > statusLine.length())
-                        System.out.print("                                                           ");
+                System.out.printf("\r%s", statusLine);
+                if (lastLine.length() > statusLine.length())
+                    System.out.print("                                                           ");
 
-                    lastLine = statusLine;
-                }
-//            }
+                lastLine = statusLine;
+            }
         }
     }
 
@@ -376,7 +360,7 @@ public class PgMigrator {
 
             String report = String.format("%.1f", 100.0 * status.row / status.rowCount);
 
-            if (!lastReport.equals(report) || status.row == status.rowCount){
+            if (!lastReport.equals(report) || status.row == status.rowCount) {
                 lastReport = report;
                 System.out.println(status);
             }
