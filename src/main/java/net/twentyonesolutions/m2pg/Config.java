@@ -83,6 +83,7 @@ public class Config {
                 , "explicit_conversion_types"
                 , "skip_tables"
                 , "skip_columns"
+                , "test_insert"
         };
 
         // populate result with config value or default of empty string
@@ -319,7 +320,6 @@ public class Config {
 
         return new TableName(tableName, schemaName);
     }
-
 
     public String getTargetColumnName(String colName) {
         String transformation = (String)this.config.getOrDefault("column_transform", "");

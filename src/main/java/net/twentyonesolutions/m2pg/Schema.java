@@ -40,7 +40,9 @@ public class Schema {
         this.explicitConversionSqlTypes = getConfigSetValues("explicit_conversion_types");
         this.skipTables = getConfigSetValues("skip_tables");
         this.skipColumns = getConfigSkippedColumns();
-        this.isTestInsertMode = (boolean) this.config.config.getOrDefault("test_insert", false);
+
+        String value = this.config.dml.get("test_insert").toString();
+        this.isTestInsertMode = Boolean.getBoolean(value);
 
         String informationSchemaSql = (String) config.config.get("information_schema.query");
         if (informationSchemaSql.isEmpty()) {
@@ -273,10 +275,13 @@ public class Schema {
                 if (progress != null)   // report progress in case the table was empty
                     progress.progress(new IProgress.Status(tableName, 0, 0));
             } else {
-                if (table.hasIdentity()) {
+                // В тестовом режиме вставки не корректируются значения seq генераторов.
+                if (table.hasIdentity() && !this.isTestInsertMode) {
 
                     Column identity = table.getIdentity();
+
                     qSelect = "SELECT MAX(" + identity.name + ") AS max_value" + "\nFROM " + table.toString();
+
                     rs = statSrc.executeQuery(qSelect);
                     if (rs.next()) {
 
